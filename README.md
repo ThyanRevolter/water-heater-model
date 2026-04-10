@@ -1,0 +1,1 @@
+This repository contains the code for the water heater model for the class project.

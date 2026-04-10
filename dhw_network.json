@@ -1,0 +1,262 @@
+{
+  "nodes": [
+    "DHWSystem",
+    "ColdWaterSupply",
+    "HotWaterTank"
+  ],
+  "connections": [
+    "ColdInlet",
+    "HotOutlet",
+    "RecircReturn"
+  ],
+  "virtual_tags": {},
+  "ColdWaterSupply": {
+    "type": "Reservoir",
+    "contents": "DrinkingWater",
+    "tags": {}
+  },
+  "HotWaterTank": {
+    "type": "Tank",
+    "num_units": 1,
+    "elevation (meters)": 0,
+    "volume (cubic meters)": 0.3,
+    "contents": "DrinkingWater",
+    "tags": {
+      "TankTemperature": {
+        "type": "Temperature",
+        "units": "C",
+        "contents": "DrinkingWater",
+        "totalized": false
+      }
+    }
+  },
+  "DHWSystem": {
+    "type": "Facility",
+    "elevation (meters)": null,
+    "input_contents": "DrinkingWater",
+    "output_contents": "DrinkingWater",
+    "flowrate": {
+      "min": null,
+      "max": null,
+      "avg": null,
+      "units": "cubic meters / day"
+    },
+    "nodes": [
+      "Boiler",
+      "PipeSegment_Supply",
+      "Junction_Floor1",
+      "Junction_Floor2",
+      "Bathroom1_Shower",
+      "Bathroom1_Faucet",
+      "Bathroom2_Shower",
+      "Bathroom2_Faucet",
+      "Kitchen_Sink",
+      "RecircPump"
+    ],
+    "connections": [
+      "BoilerToSupply",
+      "SupplyToJunctionF1",
+      "JunctionF1_toBath1Shower",
+      "JunctionF1_toBath1Faucet",
+      "JunctionF1_toJunctionF2",
+      "JunctionF2_toBath2Shower",
+      "JunctionF2_toBath2Faucet",
+      "JunctionF2_toKitchenSink",
+      "KitchenSink_toRecircPump",
+      "RecircPump_toBoiler"
+    ],
+    "tags": {}
+  },
+  "Boiler": {
+    "type": "Tank",
+    "num_units": 1,
+    "elevation (meters)": 0,
+    "volume (cubic meters)": 0.3,
+    "contents": "DrinkingWater",
+    "tags": {
+      "BoilerOutletTemp": {
+        "type": "Temperature",
+        "units": "C",
+        "contents": "DrinkingWater",
+        "totalized": false
+      }
+    }
+  },
+  "PipeSegment_Supply": {
+    "type": "Tank",
+    "num_units": 1,
+    "elevation (meters)": 0,
+    "volume (cubic meters)": 0.005,
+    "contents": "DrinkingWater",
+    "tags": {}
+  },
+  "Junction_Floor1": {
+    "type": "Junction",
+    "contents": "DrinkingWater",
+    "tags": {}
+  },
+  "Junction_Floor2": {
+    "type": "Junction",
+    "contents": "DrinkingWater",
+    "tags": {}
+  },
+  "Bathroom1_Shower": {
+    "type": "Tank",
+    "num_units": 1,
+    "elevation (meters)": 3,
+    "volume (cubic meters)": 0.002,
+    "contents": "DrinkingWater",
+    "tags": {
+      "B1ShowerTemp": {
+        "type": "Temperature",
+        "units": "C",
+        "contents": "DrinkingWater",
+        "totalized": false
+      }
+    }
+  },
+  "Bathroom1_Faucet": {
+    "type": "Tank",
+    "num_units": 1,
+    "elevation (meters)": 3,
+    "volume (cubic meters)": 0.001,
+    "contents": "DrinkingWater",
+    "tags": {}
+  },
+  "Bathroom2_Shower": {
+    "type": "Tank",
+    "num_units": 1,
+    "elevation (meters)": 6,
+    "volume (cubic meters)": 0.002,
+    "contents": "DrinkingWater",
+    "tags": {}
+  },
+  "Bathroom2_Faucet": {
+    "type": "Tank",
+    "num_units": 1,
+    "elevation (meters)": 6,
+    "volume (cubic meters)": 0.001,
+    "contents": "DrinkingWater",
+    "tags": {}
+  },
+  "Kitchen_Sink": {
+    "type": "Tank",
+    "num_units": 1,
+    "elevation (meters)": 0,
+    "volume (cubic meters)": 0.001,
+    "contents": "DrinkingWater",
+    "tags": {}
+  },
+  "RecircPump": {
+    "type": "Pump",
+    "pump_type": "Constant",
+    "contents": "DrinkingWater",
+    "num_units": 1,
+    "power_rating": {
+      "value": 0.06,
+      "units": "kW"
+    },
+    "flowrate": {
+      "min": null,
+      "max": null,
+      "avg": null,
+      "units": "cubic meters / day"
+    },
+    "tags": {}
+  },
+  "BoilerToSupply": {
+    "type": "Pipe",
+    "source": "Boiler",
+    "destination": "PipeSegment_Supply",
+    "contents": "DrinkingWater",
+    "tags": {}
+  },
+  "SupplyToJunctionF1": {
+    "type": "Pipe",
+    "source": "PipeSegment_Supply",
+    "destination": "Junction_Floor1",
+    "contents": "DrinkingWater",
+    "tags": {}
+  },
+  "JunctionF1_toBath1Shower": {
+    "type": "Pipe",
+    "source": "Junction_Floor1",
+    "destination": "Bathroom1_Shower",
+    "contents": "DrinkingWater",
+    "tags": {}
+  },
+  "JunctionF1_toBath1Faucet": {
+    "type": "Pipe",
+    "source": "Junction_Floor1",
+    "destination": "Bathroom1_Faucet",
+    "contents": "DrinkingWater",
+    "tags": {}
+  },
+  "JunctionF1_toJunctionF2": {
+    "type": "Pipe",
+    "source": "Junction_Floor1",
+    "destination": "Junction_Floor2",
+    "contents": "DrinkingWater",
+    "tags": {}
+  },
+  "JunctionF2_toBath2Shower": {
+    "type": "Pipe",
+    "source": "Junction_Floor2",
+    "destination": "Bathroom2_Shower",
+    "contents": "DrinkingWater",
+    "tags": {}
+  },
+  "JunctionF2_toBath2Faucet": {
+    "type": "Pipe",
+    "source": "Junction_Floor2",
+    "destination": "Bathroom2_Faucet",
+    "contents": "DrinkingWater",
+    "tags": {}
+  },
+  "JunctionF2_toKitchenSink": {
+    "type": "Pipe",
+    "source": "Junction_Floor2",
+    "destination": "Kitchen_Sink",
+    "contents": "DrinkingWater",
+    "tags": {}
+  },
+  "KitchenSink_toRecircPump": {
+    "type": "Pipe",
+    "source": "Kitchen_Sink",
+    "destination": "RecircPump",
+    "contents": "DrinkingWater",
+    "tags": {}
+  },
+  "RecircPump_toBoiler": {
+    "type": "Pipe",
+    "source": "RecircPump",
+    "destination": "Boiler",
+    "contents": "DrinkingWater",
+    "tags": {}
+  },
+  "ColdInlet": {
+    "type": "Pipe",
+    "source": "ColdWaterSupply",
+    "destination": "DHWSystem",
+    "entry_point": "Boiler",
+    "contents": "DrinkingWater",
+    "tags": {}
+  },
+  "HotOutlet": {
+    "type": "Pipe",
+    "source": "DHWSystem",
+    "destination": "ColdWaterSupply",
+    "exit_point": "Boiler",
+    "contents": "DrinkingWater",
+    "tags": {}
+  },
+  "RecircReturn": {
+    "type": "Pipe",
+    "source": "DHWSystem",
+    "destination": "DHWSystem",
+    "exit_point": "RecircPump",
+    "entry_point": "Boiler",
+    "contents": "DrinkingWater",
+    "tags": {}
+  }
+}
