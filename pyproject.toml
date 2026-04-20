@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "water-heater-model"
 version = "0.1.0"
@@ -6,6 +10,12 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "matplotlib>=3.10.8",
+    "networkx>=3.6.1",
     "numpy>=2.4.4",
     "scipy>=1.17.1",
 ]
+
+# Only ship the `dhw` package. `output/` is run artifacts; setuptools would
+# otherwise treat multiple top-level dirs as ambiguous in a flat layout.
+[tool.setuptools]
+packages = ["dhw"]

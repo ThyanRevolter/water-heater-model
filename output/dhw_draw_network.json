@@ -1,0 +1,262 @@
+{
+  "nodes": [
+    "ColdWaterSupply",
+    "DHWSystem"
+  ],
+  "connections": [
+    "ColdInlet"
+  ],
+  "virtual_tags": {},
+  "ColdWaterSupply": {
+    "type": "Reservoir",
+    "contents": "DrinkingWater",
+    "tags": {}
+  },
+  "DHWSystem": {
+    "type": "Facility",
+    "input_contents": "DrinkingWater",
+    "output_contents": "DrinkingWater",
+    "elevation": {
+      "value": 0,
+      "units": "m"
+    },
+    "flowrate": {
+      "min": null,
+      "max": null,
+      "design": null,
+      "units": "cubic meters / day"
+    },
+    "tags": {},
+    "nodes": [
+      "HotWaterHeater",
+      "Junction_Floor1",
+      "Junction_Floor2",
+      "Bathroom1_Shower",
+      "Bathroom1_Faucet",
+      "Bathroom2_Shower",
+      "Bathroom2_Faucet",
+      "Kitchen_Sink",
+      "RecircPump"
+    ],
+    "connections": [
+      "HeaterToJunctionF1",
+      "JunctionF1_toBath1Shower",
+      "JunctionF1_toBath1Faucet",
+      "JunctionF1_toJunctionF2",
+      "JunctionF2_toBath2Shower",
+      "JunctionF2_toBath2Faucet",
+      "JunctionF2_toKitchenSink",
+      "JunctionF2_toRecircPump",
+      "RecircPump_toHotWaterHeater"
+    ]
+  },
+  "HotWaterHeater": {
+    "type": "Tank",
+    "num_units": 1,
+    "elevation": {
+      "value": 0,
+      "units": "m"
+    },
+    "volume": {
+      "value": 0.3,
+      "units": "m^3"
+    },
+    "contents": "DrinkingWater",
+    "tags": {
+      "HeaterOutletTemp": {
+        "type": "Temperature",
+        "units": "celsius",
+        "contents": "DrinkingWater",
+        "totalized": false
+      }
+    }
+  },
+  "Junction_Floor1": {
+    "type": "Junction",
+    "contents": "DrinkingWater",
+    "tags": {}
+  },
+  "Junction_Floor2": {
+    "type": "Junction",
+    "contents": "DrinkingWater",
+    "tags": {}
+  },
+  "Bathroom1_Shower": {
+    "type": "Junction",
+    "num_units": 1,
+    "elevation": {
+      "value": 3.0,
+      "units": "m"
+    },
+    "volume": {
+      "value": 0.002,
+      "units": "m^3"
+    },
+    "contents": "DrinkingWater",
+    "tags": {
+      "B1ShowerTemp": {
+        "type": "Temperature",
+        "units": "celsius",
+        "contents": "DrinkingWater",
+        "totalized": false
+      }
+    }
+  },
+  "Bathroom1_Faucet": {
+    "type": "Junction",
+    "num_units": 1,
+    "elevation": {
+      "value": 3.0,
+      "units": "m"
+    },
+    "volume": {
+      "value": 0.001,
+      "units": "m^3"
+    },
+    "contents": "DrinkingWater",
+    "tags": {}
+  },
+  "Bathroom2_Shower": {
+    "type": "Junction",
+    "num_units": 1,
+    "elevation": {
+      "value": 6.0,
+      "units": "m"
+    },
+    "volume": {
+      "value": 0.002,
+      "units": "m^3"
+    },
+    "contents": "DrinkingWater",
+    "tags": {
+      "B2ShowerTemp": {
+        "type": "Temperature",
+        "units": "celsius",
+        "contents": "DrinkingWater",
+        "totalized": false
+      }
+    }
+  },
+  "Bathroom2_Faucet": {
+    "type": "Junction",
+    "num_units": 1,
+    "elevation": {
+      "value": 6.0,
+      "units": "m"
+    },
+    "volume": {
+      "value": 0.001,
+      "units": "m^3"
+    },
+    "contents": "DrinkingWater",
+    "tags": {}
+  },
+  "Kitchen_Sink": {
+    "type": "Junction",
+    "num_units": 1,
+    "elevation": {
+      "value": 0.0,
+      "units": "m"
+    },
+    "volume": {
+      "value": 0.001,
+      "units": "m^3"
+    },
+    "contents": "DrinkingWater",
+    "tags": {}
+  },
+  "RecircPump": {
+    "type": "Pump",
+    "pump_type": "Constant",
+    "contents": "DrinkingWater",
+    "num_units": 1,
+    "power_rating": {
+      "value": 0.06,
+      "units": "kW"
+    },
+    "flowrate": {
+      "min": null,
+      "max": null,
+      "design": null,
+      "units": "cubic meters / day"
+    },
+    "tags": {}
+  },
+  "ColdInlet": {
+    "type": "Pipe",
+    "source": "ColdWaterSupply",
+    "destination": "DHWSystem",
+    "contents": "DrinkingWater",
+    "tags": {},
+    "entry_point": "HotWaterHeater",
+    "flowrate": {
+      "min": null,
+      "max": null,
+      "design": null,
+      "units": "cubic meters / day"
+    }
+  },
+  "HeaterToJunctionF1": {
+    "type": "Pipe",
+    "source": "HotWaterHeater",
+    "destination": "Junction_Floor1",
+    "contents": "DrinkingWater",
+    "tags": {}
+  },
+  "JunctionF1_toBath1Shower": {
+    "type": "Pipe",
+    "source": "Junction_Floor1",
+    "destination": "Bathroom1_Shower",
+    "contents": "DrinkingWater",
+    "tags": {}
+  },
+  "JunctionF1_toBath1Faucet": {
+    "type": "Pipe",
+    "source": "Junction_Floor1",
+    "destination": "Bathroom1_Faucet",
+    "contents": "DrinkingWater",
+    "tags": {}
+  },
+  "JunctionF1_toJunctionF2": {
+    "type": "Pipe",
+    "source": "Junction_Floor1",
+    "destination": "Junction_Floor2",
+    "contents": "DrinkingWater",
+    "tags": {}
+  },
+  "JunctionF2_toBath2Shower": {
+    "type": "Pipe",
+    "source": "Junction_Floor2",
+    "destination": "Bathroom2_Shower",
+    "contents": "DrinkingWater",
+    "tags": {}
+  },
+  "JunctionF2_toBath2Faucet": {
+    "type": "Pipe",
+    "source": "Junction_Floor2",
+    "destination": "Bathroom2_Faucet",
+    "contents": "DrinkingWater",
+    "tags": {}
+  },
+  "JunctionF2_toKitchenSink": {
+    "type": "Pipe",
+    "source": "Junction_Floor2",
+    "destination": "Kitchen_Sink",
+    "contents": "DrinkingWater",
+    "tags": {}
+  },
+  "JunctionF2_toRecircPump": {
+    "type": "Pipe",
+    "source": "Junction_Floor2",
+    "destination": "RecircPump",
+    "contents": "DrinkingWater",
+    "tags": {}
+  },
+  "RecircPump_toHotWaterHeater": {
+    "type": "Pipe",
+    "source": "RecircPump",
+    "destination": "HotWaterHeater",
+    "contents": "DrinkingWater",
+    "tags": {}
+  }
+}
