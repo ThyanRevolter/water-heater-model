@@ -30,8 +30,9 @@ from typing import Callable, Iterable, Sequence
 
 import matplotlib.pyplot as plt
 import numpy as np
+from scipy.integrate import solve_ivp
 
-from dhw import DHWNetwork, DrawNode
+from dhw import DHWNetwork, DrawNode, PipeParams
 from dhw.network import _cell_at, default_pipe  # noqa: F401  (re-exported helpers)
 
 
@@ -145,6 +146,32 @@ def csv_draw_profile(
 
 
 # ──────────────────────────────────────────────────────────────────────
+# Pretty-print helper
+# ──────────────────────────────────────────────────────────────────────
+
+def _print_discretisation(net: DHWNetwork, dz: float) -> None:
+    print(f"  Target dz = {dz} m — pipe discretisation:")
+    for name, pipe in zip(net.pipe_names, net.pipes):
+        actual_dz = pipe.length / pipe.N_cells
+        print(f"    {name:<18s}  L={pipe.length:5.1f} m  "
+              f"N={pipe.N_cells:3d} cells  dz={actual_dz:.3f} m")
+
+
+def _print_network_diagram(net: DHWNetwork) -> None:
+    print("\n  Network diagram:")
+    print("    Boiler")
+    print("      |")
+    print("      +-- pipe0 --> Shower (draw)")
+    print("                      |")
+    print("                      +-- pipe1 --> Faucet (draw)")
+    print("                                      |")
+    print("                                      +-- pipe2 --> Sink (draw)")
+    print("                                                      |")
+    print("                                                      +-- pipe3 --> Pump --> Boiler")
+    print(f"    Recirculation setpoint: mdot_recirc = {net.mdot_recirc:g} kg/s")
+
+
+# ──────────────────────────────────────────────────────────────────────
 # Hydraulic model (mass balance)
 # ──────────────────────────────────────────────────────────────────────
 
@@ -227,11 +254,12 @@ def build_residential_network(
         T_supply=60.0,
         heater_power=4500.0,
         boiler_volume=0.189,
-        mdot_recirc=0.3,
-        T_ambient=20.0,
+        mdot_recirc=0.05,
+        T_ambient=16.0,
         T_cold=15.0,
         return_pipe_idx=3,
         pipe_flow_fn=_residential_pipe_flow,
+        dz=dz,
     )
 
     pipe_lengths = [6.0, 3.0, 4.0, 10.0]
@@ -276,63 +304,545 @@ def build_residential_network(
 
 
 # ──────────────────────────────────────────────────────────────────────
-# Flow-rate solver over a simulation window
+# Pipe heat loss calculator
 # ──────────────────────────────────────────────────────────────────────
 
-def solve_flow_rates(
-    net: DHWNetwork,
-    t_start: float,
-    t_end: float,
-    dt: float = 1.0,
-) -> dict:
-    """Compute pipe flow rates at every timestep.
+def compute_pipe_UA(p: PipeParams) -> float:
+    """
+    Overall heat loss coefficient per unit length [W/(m·K)].
+
+    Uses the radial conduction + external convection model (Klimczak et al., Eq. 2).
+    Internal convection resistance is neglected (turbulent flow → h_in → ∞).
+    """
+    d_i = p.inner_diameter
+    d_o = d_i + 2 * p.wall_thickness
+    d_ins = d_o + 2 * p.insulation_t
+
+    R_pipe = np.log(d_o / d_i) / (2 * np.pi * p.pipe_k)
+    R_ins  = np.log(d_ins / d_o) / (2 * np.pi * p.insulation_k)
+    R_ext  = 1.0 / (np.pi * d_ins * p.h_ext)
+
+    return 1.0 / (R_pipe + R_ins + R_ext)   # W/(m·K)
+
+
+def pipe_downstream_temp(
+    pipe: PipeParams,
+    flow_rate: float,
+    T_upstream: float,
+    dt: float,
+    T_ambient: float,
+    rho: float = 998.0,
+    c: float = 4186.0,
+) -> float:
+    """Compute the outlet temperature of a pipe after one timestep *dt*.
+
+    Solves the 1-D advection–heat-loss PDE on the pipe's ``N_cells`` finite-
+    volume cells using an explicit first-order upwind scheme.  The CFL and
+    Fourier stability constraints are enforced automatically via sub-stepping.
+
+    Governing equation (per cell *i*):
+
+    .. math::
+
+        \\rho A \\Delta z \\, c \\frac{\\partial T_i}{\\partial t}
+        = \\dot{m} c (T_{i-1} - T_i)
+          - U\\!A_L \\Delta z (T_i - T_{\\text{amb}})
+
+    where :math:`T_{-1} = T_{\\text{upstream}}` is the inlet boundary condition
+    and the cell temperature profile is initialised uniformly at *T_upstream*.
 
     Parameters
     ----------
-    net :
-        Network built by :func:`build_residential_network`.
-    t_start, t_end :
-        Simulation window, in seconds.
+    pipe :
+        Pipe geometry and thermal properties (already discretised into
+        ``pipe.N_cells`` cells of length ``dz = pipe.length / pipe.N_cells``).
+    flow_rate :
+        Mass flow rate through the pipe [kg/s].  Zero flow is allowed
+        (pure conduction / heat-loss, no advection).
+    T_upstream :
+        Temperature at the upstream (inlet) node [°C].
     dt :
-        Timestep, in seconds. Defaults to 1 s.
+        Macro-timestep over which to advance the solution [s].
+    T_ambient :
+        Ambient temperature surrounding the pipe [°C].
+    rho :
+        Water density [kg/m³].  Defaults to 998 kg/m³.
+    c :
+        Specific heat of water [J/(kg·K)].  Defaults to 4186 J/(kg·K).
 
     Returns
     -------
-    dict
-        ``time``       : 1-D array of time values ``(N_steps,)``.
-        ``pipe_flows`` : 2-D array ``(N_steps, N_pipes)`` — ṁ in each pipe.
-        ``mdot_cold``  : 1-D array ``(N_steps,)`` — cold-makeup mass flow.
-        ``draw_rates`` : 2-D array ``(N_steps, N_draws)`` — per-draw rate.
+    float
+        Temperature at the downstream (outlet) node after *dt* seconds [°C].
     """
-    times = np.arange(t_start, t_end, dt)
-    n_steps = len(times)
-    n_pipes = len(net.pipes)
-    n_draws = len(net.draw_nodes)
+    N   = pipe.N_cells
+    dz  = pipe.dz
+    A   = np.pi / 4.0 * pipe.inner_diameter ** 2   # m²
+    UA_L = compute_pipe_UA(pipe)                    # W/(m·K)
 
-    pipe_flows = np.zeros((n_steps, n_pipes))
-    draw_rates = np.zeros((n_steps, n_draws))
-    mdot_cold = np.zeros(n_steps)
+    # ── Stable sub-timestep (explicit scheme) ─────────────────────────
+    u = flow_rate / (rho * A) if flow_rate > 0.0 else 0.0
+    dt_cfl   = dz / u          if u    > 0.0 else dt  # CFL = 1
+    dt_four  = 0.5 * rho * A * c / UA_L if UA_L > 0.0 else dt  # Fourier ≤ 0.5
+    dt_sub   = min(dt_cfl, dt_four, dt)
+    n_sub    = max(1, int(np.ceil(dt / dt_sub)))
+    dt_sub   = dt / n_sub                             # rebalance evenly
 
-    for k, t in enumerate(times):
-        draw_at_pipe_cell: dict[tuple[int, int], float] = {}
+    # ── Initial condition: pipe uniformly at upstream temperature ──────
+    T = np.full(N, T_upstream, dtype=float)
+
+    for _ in range(n_sub):
+        # Upwind inlet: ghost value for cell 0 is the inlet BC
+        T_in    = np.empty(N)
+        T_in[0] = T_upstream
+        T_in[1:] = T[:-1]
+
+        # Explicit upwind update
+        T = (T
+             - (flow_rate * dt_sub) / (rho * A * dz) * (T - T_in)   # advection
+             - (UA_L * dt_sub) / (rho * A * c) * (T - T_ambient))    # heat loss
+
+    return float(T[-1])
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Flow-rate solver over a simulation window
+# ──────────────────────────────────────────────────────────────────────
+
+class FlowSolver:
+    
+    
+    def __init__(
+        self,
+        net: DHWNetwork,
+        t_start: float,
+        t_end: float,
+        dt: float = 1.0,
+    ):
+        self.net = net
+        self.t_start = t_start
+        self.t_end = t_end
+        self.dt = dt
+    
+    def solve_flow_rates(
+        self,
+    ) -> dict:
+        """Compute pipe flow rates at every timestep
+
+        Returns
+        -------
+        dict
+            ``time``       : 1-D array of time values ``(N_steps,)``.
+            ``pipe_flows`` : 2-D array ``(N_steps, N_pipes)`` — ṁ in each pipe.
+            ``pipe_contributions`` : 3-D array ``(N_steps, N_pipes, N_components)``
+                with stacked positive flow contributions in each pipe.
+                Component order is ``[recirculation, *draw_nodes]``.
+            ``pipe_contribution_labels`` : list of component labels matching the
+                third axis of ``pipe_contributions``.
+            ``mdot_cold``  : 1-D array ``(N_steps,)`` — cold-makeup mass flow.
+            ``draw_rates`` : 2-D array ``(N_steps, N_draws)`` — per-draw rate.
+        """
+        times = np.arange(self.t_start, self.t_end, self.dt)
+        n_steps = len(times)
+        n_pipes = len(self.net.pipes)
+        n_draws = len(self.net.draw_nodes)
+
+
+        pipe_flows = np.zeros((n_steps, n_pipes))
+        draw_rates = np.zeros((n_steps, n_draws))
+        mdot_cold = np.zeros(n_steps)
+
+        for k, t in enumerate(times):
+            draw_at_pipe_cell: dict[tuple[int, int], float] = {}
+            for j, dn in enumerate(self.net.draw_nodes):
+                mdot = dn.draw_profile(t)
+                draw_rates[k, j] = mdot
+                draw_at_pipe_cell[(dn.pipe_index, dn.cell_index)] = mdot
+
+            q = self.net.pipe_flow_fn(self.net, draw_at_pipe_cell)
+            pipe_flows[k, :] = q
+            mdot_cold[k] = draw_rates[k, :].sum()
+
+        # Build a stackable decomposition of each pipe flow:
+        # q_pipe = recirculation contribution + downstream draw contributions.
+        contribution_labels = ["recirculation", *[dn.name for dn in self.net.draw_nodes]]
+        n_components = len(contribution_labels)
+        pipe_contributions = np.zeros((n_steps, n_pipes, n_components))
+
+        # Recirculation contribution is present in every pipe in this loop model.
+        pipe_contributions[:, :, 0] = self.net.mdot_recirc
+
+        # A draw contributes to its own pipe and all upstream supply pipes.
+        # We determine upstream pipes through parent_map ancestry.
+        for j, dn in enumerate(self.net.draw_nodes):
+            upstream = set()
+            p = dn.pipe_index
+            while True:
+                upstream.add(p)
+                if p not in self.net.parent_map:
+                    break
+                p = self.net.parent_map[p]
+            for p_idx in upstream:
+                pipe_contributions[:, p_idx, j + 1] = draw_rates[:, j]
+
+        return {
+            "time": times,
+            "pipe_flows": pipe_flows,
+            "pipe_contributions": pipe_contributions,
+            "pipe_contribution_labels": contribution_labels,
+            "mdot_cold": mdot_cold,
+            "draw_rates": draw_rates,
+        }
+
+    def calculate_boiler_temperature(
+        self,
+        T_init: float,
+        T_recirc: float,
+        dt: float,
+        mdot_cold: float,
+        mdot_recirc: float,
+        mdot_draw: float,
+    ) -> float:
+        """Advance the boiler temperature by one timestep *dt*.
+
+        The boiler is modelled as a perfectly mixed tank of fixed volume.
+        Energy balance:
+
+        .. math::
+
+            \\rho V c \\frac{dT}{dt}
+            = Q_{\\text{heater}}
+            + \\dot{m}_{\\text{cold}} c (T_{\\text{cold}} - T)
+            + \\dot{m}_{\\text{recirc}} c (T_{\\text{recirc}} - T)
+
+        which is a linear ODE  :math:`dT/dt = A - B T`  solved analytically
+        (unconditionally stable for any *dt*).
+
+        A bang-bang thermostat applies the full heater power while
+        ``T_init < T_supply`` and switches it off otherwise.
+
+        Parameters
+        ----------
+        T_init :
+            Boiler water temperature at the start of the timestep [°C].
+        T_recirc :
+            Temperature of recirculation return water entering the boiler [°C].
+        dt :
+            Timestep duration [s].
+        mdot_cold :
+            Cold-makeup mass flow rate into the boiler [kg/s].
+        mdot_recirc :
+            Recirculation mass flow rate through the boiler [kg/s].
+        mdot_draw :
+            Total hot-water draw rate leaving the boiler [kg/s].
+            By mass balance this equals *mdot_cold*; the parameter is accepted
+            for bookkeeping / caller convenience.
+
+        Returns
+        -------
+        float
+            Boiler water temperature at the end of the timestep [°C].
+        """
+        rho      = self.net.rho # kg/m³
+        c        = self.net.c # J/(kg·K)
+        V        = self.net.boiler_volume # m3
+        T_cold   = self.net.T_cold # °C
+        T_supply = self.net.T_supply # °C
+        Q_htr    = self.net.heater_power if T_init < T_supply else 0.0 # W
+
+        # Thermal mass of the boiler water kg
+        M = rho * V # kg
+
+        dTdt = (Q_htr + rho * c * mdot_cold * (T_cold - T_init)
+             + rho * c * mdot_recirc * (T_recirc - T_init)) / (M * c)
+
+        T_new = T_init + dTdt * dt # °C
+
+        return float(T_new)
+
+    def simulate_temperatures(self, T_init: float) -> dict:
+        """Simulate water temperature across the network over the full time window.
+
+        Follows the same two-step pattern as :meth:`solve_flow_rates`:
+
+        1. **Flow pass** — call :meth:`solve_flow_rates` to get the mass-flow
+           rate in every pipe at every timestep.
+        2. **Temperature pass** — integrate the coupled thermal ODE system
+           using those pre-computed flow rates as a zero-order-hold (step)
+           input signal looked up inside the RHS.
+
+        The coupled ODE system is:
+
+        * **Boiler** (well-mixed tank):
+
+          .. math::
+
+              \\rho V c \\frac{dT_b}{dt}
+              = Q_{\\text{htr}}
+              + \\dot{m}_{\\text{cold}} c (T_{\\text{cold}} - T_b)
+              + \\dot{m}_{\\text{recirc}} c (T_{\\text{ret}} - T_b)
+
+        * **Each pipe cell** *j* of pipe *i* (upwind advection + wall loss + optional HX):
+
+          .. math::
+
+              \\rho A_i \\Delta z_i c \\frac{dT_{i,j}}{dt}
+              = \\dot{m}_i c (T_{i,j-1} - T_{i,j})
+              - U\\!A_i \\Delta z_i (T_{i,j} - T_{\\text{amb}})
+              - U\\!A_{\\text{hx}} (T_{i,j} - T_{\\text{proc}})
+
+        ``scipy.integrate.solve_ivp`` with ``LSODA`` handles the nonlinear
+        thermostat and auto-detects stiffness from cells with small time
+        constants.
+
+        Returns
+        -------
+        dict
+            ``time``        : 1-D array ``(N_t,)`` of evaluation times [s].
+            ``T_boiler``    : 1-D array ``(N_t,)`` — boiler temperature [°C].
+            ``T_draw``      : 2-D array ``(N_t, N_draws)`` — temperature at
+                             each draw node [°C].
+            ``draw_names``  : list of draw-node name strings.
+            ``T_pipe``      : dict ``{pipe_idx: ndarray (N_t, N_cells)}`` —
+                             full spatial temperature history of every pipe.
+            ``pipe_flows``  : 2-D array ``(N_t, N_pipes)`` — pre-computed
+                             mass-flow rates from the flow pass.
+        """
+        # ── Step 1: hydraulic pass ─────────────────────────────────────
+        flow_result = self.solve_flow_rates()
+        times_flow  = flow_result["time"]           # (N_steps,)
+        pipe_flows  = flow_result["pipe_flows"]     # (N_steps, N_pipes)
+        mdot_cold_t = flow_result["mdot_cold"]      # (N_steps,)  Σ draws
+
+        net     = self.net
+        pipes   = net.pipes
+        n_pipes = len(pipes)
+
+        # ── State-vector layout ────────────────────────────────────────
+        # y[0]                            = T_boiler
+        # y[offsets[i] : offsets[i]+N_i] = T_pipe_i   (i = 0 … n_pipes-1)
+        offsets = np.zeros(n_pipes, dtype=int)
+        offsets[0] = 1
+        for i in range(1, n_pipes):
+            offsets[i] = offsets[i - 1] + pipes[i - 1].N_cells
+        n_states = 1 + sum(p.N_cells for p in pipes)
+
+        # ── Pre-computed per-pipe geometry ─────────────────────────────
+        pipe_A   = np.array([np.pi / 4.0 * p.inner_diameter ** 2 for p in pipes])
+        pipe_UA  = np.array([compute_pipe_UA(p) for p in pipes])
+        pipe_dz  = np.array([p.dz for p in pipes])
+
+        # ── HX lookup: (pipe_idx, cell_idx) → (UA_hx, T_process) ─────
+        hx_lookup: dict[tuple[int, int], tuple[float, float]] = {
+            (hx.pipe_index, hx.cell_index): (hx.UA_hx, hx.T_process)
+            for hx in net.hx_nodes
+        }
+
+        # ── Step 2: thermal ODE pass ───────────────────────────────────
+        def rhs(t: float, y: np.ndarray) -> np.ndarray:
+            T_boiler = y[0]
+            dy       = np.zeros(n_states)
+
+            # Look up pre-computed flow rates (zero-order hold on the
+            # hydraulic grid — same step-function semantics as draw profiles)
+            k    = max(0, int(np.searchsorted(times_flow, t, side="right")) - 1)
+            q    = pipe_flows[k]            # (n_pipes,) mass-flow rates [kg/s]
+            mdot_cold = mdot_cold_t[k]
+
+            # ── Pipe cell ODEs ─────────────────────────────────────────
+            for i, pipe in enumerate(pipes):
+                N    = pipe.N_cells
+                s    = offsets[i]
+                T_p  = y[s : s + N]
+                A    = pipe_A[i]
+                UA_L = pipe_UA[i]
+                mdot = q[i]
+                m_cell = net.rho * A * pipe_dz[i]  # kg — thermal mass per cell
+
+                # Upstream BC: boiler outlet or parent pipe's last cell
+                if i in net.parent_map:
+                    p_idx = net.parent_map[i]
+                    T_in  = y[offsets[p_idx] + pipes[p_idx].N_cells - 1]
+                else:
+                    T_in = T_boiler
+
+                T_ghost     = np.empty(N)
+                T_ghost[0]  = T_in
+                T_ghost[1:] = T_p[:-1]
+
+                # Advection (upwind) + wall heat loss
+                dT = (
+                    mdot / m_cell * (T_ghost - T_p)                          # advection  [K/s]
+                    - UA_L / (net.rho * A * net.c) * (T_p - net.T_ambient)  # wall loss  [K/s]
+                )
+
+                # Optional HX nodes
+                for j in range(N):
+                    if (i, j) in hx_lookup:
+                        UA_hx, T_proc = hx_lookup[(i, j)]
+                        dT[j] -= UA_hx / (m_cell * net.c) * (T_p[j] - T_proc)
+
+                dy[s : s + N] = dT
+
+            # ── Boiler ODE ─────────────────────────────────────────────
+            ret_idx     = net.return_pipe_idx
+            T_recirc    = y[offsets[ret_idx] + pipes[ret_idx].N_cells - 1]
+            Q_htr       = net.heater_power if T_boiler < net.T_supply else 0.0 # W
+            M           = net.rho * net.boiler_volume
+
+            dy[0] = (
+                Q_htr / (M * net.c)
+                + mdot_cold       / M * (net.T_cold - T_boiler)
+                + net.mdot_recirc / M * (T_recirc   - T_boiler)
+            )
+
+            return dy
+
+        y0  = np.full(n_states, T_init)
+        sol = solve_ivp(
+            rhs,
+            (self.t_start, self.t_end),
+            y0,
+            method="LSODA",
+            t_eval=times_flow,   # same grid as the hydraulic pass
+            rtol=1e-3,
+            atol=1e-4,
+        )
+
+        if not sol.success:
+            raise RuntimeError(f"simulate_temperatures: solve_ivp failed — {sol.message}")
+
+        # ── Unpack results ─────────────────────────────────────────────
+        T_boiler = sol.y[0]
+
+        n_draws = len(net.draw_nodes)
+        T_draw  = np.zeros((len(sol.t), n_draws))
         for j, dn in enumerate(net.draw_nodes):
-            mdot = dn.draw_profile(t)
-            draw_rates[k, j] = mdot
-            draw_at_pipe_cell[(dn.pipe_index, dn.cell_index)] = mdot
+            T_draw[:, j] = sol.y[offsets[dn.pipe_index] + dn.cell_index]
 
-        q = net.pipe_flow_fn(net, draw_at_pipe_cell)
-        pipe_flows[k, :] = q
-        mdot_cold[k] = draw_rates[k, :].sum()
+        T_pipe_out: dict[int, np.ndarray] = {
+            i: sol.y[offsets[i] : offsets[i] + pipes[i].N_cells].T
+            for i in range(n_pipes)
+        }
 
-    return {
-        "time": times,
-        "pipe_flows": pipe_flows,
-        "mdot_cold": mdot_cold,
-        "draw_rates": draw_rates,
-    }
+        return {
+            "time":       sol.t,
+            "T_boiler":   T_boiler,
+            "T_draw":     T_draw,
+            "draw_names": [dn.name for dn in net.draw_nodes],
+            "T_pipe":     T_pipe_out,
+            "pipe_flows": pipe_flows,
+        }
+
+    def compute_heater_energy(self, result: dict) -> dict:
+        """Integrate heater energy from temperature timeseries.
+        
+        Returns dict with time array, instantaneous power [W], 
+        and cumulative energy [J] and [kWh].
+        """
+        t = result["time"] # s
+        T_boiler = result["T_boiler"] # °C
+        
+        Q_htr = np.where(T_boiler < self.net.T_supply, self.net.heater_power, 0.0) # W
+        
+        # Trapezoidal integration for cumulative energy
+        E_cumulative = np.zeros_like(t)
+        E_cumulative[1:] = np.cumsum(
+            0.5 * (Q_htr[:-1] + Q_htr[1:]) * np.diff(t) # J
+        )
+        
+        return {
+            "time": t,
+            "power_W": Q_htr,
+            "energy_J": E_cumulative,
+            "energy_kWh": E_cumulative / 3.6e6, # kWh
+            "total_kWh": E_cumulative[-1] / 3.6e6, # kWh
+        }
+# ──────────────────────────────────────────────────────────────────────
+# Plotting functions
+# ──────────────────────────────────────────────────────────────────────
+
+def plot_temperature_timeseries(
+    result: dict,
+    *,
+    time_unit: str = "h",
+    figsize: tuple[float, float] | None = None,
+    save_path: str | Path | None = None,
+    show: bool = False,
+) -> plt.Figure:
+    """Plot boiler and per-draw-node temperatures from :meth:`simulate_temperatures`.
+
+    Parameters
+    ----------
+    result :
+        Return value of :meth:`FlowSolver.simulate_temperatures`.
+    time_unit :
+        ``"h"`` (hours) or ``"s"`` (seconds) for the horizontal axis.
+    figsize :
+        Optional ``(width, height)`` in inches.
+    save_path :
+        If set, the figure is saved here (parent dirs created automatically).
+    show :
+        If ``True``, call ``plt.show()`` before returning.
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+    """
+    t_s  = np.asarray(result["time"], dtype=float)
+    t_plot, xlabel = (t_s / 3600.0, "Time [h]") if time_unit == "h" else (t_s, "Time [s]")
+
+    T_boiler   = np.asarray(result["T_boiler"])
+    T_draw     = np.asarray(result["T_draw"])          # (N_t, N_draws)
+    draw_names = list(result["draw_names"])
+    n_draws    = T_draw.shape[1]
+
+    n_axes = 1 + n_draws
+    w, h   = figsize if figsize is not None else (12.0, max(5.0, 2.0 * n_axes))
+    fig, axes = plt.subplots(n_axes, 1, sharex=True, figsize=(w, h))
+    if n_axes == 1:
+        axes = np.array([axes])
+
+    # Boiler temperature
+    ax = axes[0]
+    ax.plot(t_plot, T_boiler, color="C0", linewidth=1.2, label="Boiler")
+    ax.set_ylabel("T [°C]")
+    ax.set_title("Boiler temperature")
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc="upper right", fontsize=8)
+
+    # Per-draw temperatures
+    for j in range(n_draws):
+        ax = axes[j + 1]
+        ax.plot(t_plot, T_draw[:, j], color=f"C{j + 1}", linewidth=1.2)
+        ax.set_ylabel("T [°C]")
+        ax.set_title(f"Draw temperature: {draw_names[j]}")
+        ax.grid(True, alpha=0.3)
+
+    axes[-1].set_xlabel(xlabel)
+    fig.align_ylabels(axes)
+    plt.tight_layout()
+
+    if save_path is not None:
+        save_path = Path(save_path)
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+    if show:
+        plt.show()
+    return fig
 
 
-def plot_flow_timeseries(
+def _time_axis(result: dict, time_unit: str) -> tuple[np.ndarray, str]:
+
+    t_s = np.asarray(result["time"], dtype=float)
+    if time_unit == "h":
+        return t_s / 3600.0, "Time [h]"
+    if time_unit == "s":
+        return t_s, "Time [s]"
+    raise ValueError("time_unit must be 'h' or 's'")
+
+
+def plot_pipe_flow_timeseries(
     net: DHWNetwork,
     result: dict,
     *,
@@ -341,15 +851,11 @@ def plot_flow_timeseries(
     save_path: str | Path | None = None,
     show: bool = False,
 ) -> plt.Figure:
-    """Plot pipe ṁ and node-side flows (draws + cold makeup) as stacked subplots.
+    """Plot stacked flow contributions for each pipe.
 
-    Pipe flows are the scalar ṁ per pipe from :func:`solve_flow_rates`. The
-    recirculation pump does not appear as its own curve: in this model the pump
-    fixes ṁ to ``net.mdot_recirc`` in the return pipe (see ``net.return_pipe_idx``),
-    so that pipe’s subplot is the pump delivery (typically a flat line).
-
-    Node flows are the draw rates at each :class:`~dhw.models.DrawNode` and the
-    boiler cold-makeup rate (Σ draws).
+    Pipe subplots are stacked-area compositions built from
+    ``result["pipe_contributions"]`` and show how each component
+    (recirculation + fixture draws) contributes to each pipe flow.
 
     Parameters
     ----------
@@ -357,7 +863,7 @@ def plot_flow_timeseries(
         Network used to build ``result``.
     result :
         Return value of :func:`solve_flow_rates` (keys ``time``, ``pipe_flows``,
-        ``draw_rates``, ``mdot_cold``).
+        ``pipe_contributions``).
     time_unit :
         ``"h"`` for hours or ``"s"`` for seconds on the horizontal axis.
     figsize :
@@ -371,25 +877,16 @@ def plot_flow_timeseries(
     -------
     matplotlib.figure.Figure
     """
-    t_s = np.asarray(result["time"], dtype=float)
-    if time_unit == "h":
-        t_plot = t_s / 3600.0
-        xlabel = "Time [h]"
-    elif time_unit == "s":
-        t_plot = t_s
-        xlabel = "Time [s]"
-    else:
-        raise ValueError("time_unit must be 'h' or 's'")
+    t_plot, xlabel = _time_axis(result, time_unit)
 
     pipe_flows = np.asarray(result["pipe_flows"])
-    draw_rates = np.asarray(result["draw_rates"])
-    mdot_cold = np.asarray(result["mdot_cold"])
+    pipe_contributions = np.asarray(result["pipe_contributions"])
+    contribution_labels = list(result["pipe_contribution_labels"])
 
     n_pipes = pipe_flows.shape[1]
-    n_draws = draw_rates.shape[1]
-    n_axes = n_pipes + n_draws + 1
+    n_axes = n_pipes
 
-    w, h = figsize if figsize is not None else (12.0, max(6.0, 2.0 * n_axes))
+    w, h = figsize if figsize is not None else (12.0, max(5.0, 2.0 * n_axes))
     fig, axes = plt.subplots(n_axes, 1, sharex=True, figsize=(w, h))
     if n_axes == 1:
         axes = np.array([axes])
@@ -399,19 +896,57 @@ def plot_flow_timeseries(
     for i in range(n_pipes):
         ax = axes[i]
         label = names[i] if i < len(names) else f"pipe {i}"
-        ax.plot(t_plot, pipe_flows[:, i], color="C0", linewidth=1.0)
+        y_stack = [pipe_contributions[:, i, k] for k in range(pipe_contributions.shape[2])]
+        ax.stackplot(t_plot, *y_stack, labels=contribution_labels, alpha=0.9)
+        ax.plot(t_plot, pipe_flows[:, i], color="k", linewidth=0.9, alpha=0.75)
         ax.set_ylabel("ṁ [kg/s]")
-        title = f"Pipe: {label}"
+        title = f"Pipe: {label} (stacked contributions)"
         if rpi is not None and i == rpi:
             title += f" — recirc pump (ṁ fixed = {net.mdot_recirc:g} kg/s)"
         ax.set_title(title)
         ax.grid(True, alpha=0.3)
+        # Keep legend compact and only show it once.
+        if i == 0:
+            ax.legend(loc="upper right", ncol=2, fontsize=8)
 
-    base = n_pipes
+    axes[-1].set_xlabel(xlabel)
+
+    fig.align_ylabels(axes)
+    plt.tight_layout()
+    if save_path is not None:
+        save_path = Path(save_path)
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+    if show:
+        plt.show()
+    return fig
+
+
+def plot_draw_timeseries(
+    net: DHWNetwork,
+    result: dict,
+    *,
+    time_unit: str = "h",
+    figsize: tuple[float, float] | None = None,
+    save_path: str | Path | None = None,
+    show: bool = False,
+) -> plt.Figure:
+    """Plot per-draw rates and boiler cold-makeup in a separate figure."""
+    t_plot, xlabel = _time_axis(result, time_unit)
+    draw_rates = np.asarray(result["draw_rates"])
+    mdot_cold = np.asarray(result["mdot_cold"])
+
+    n_draws = draw_rates.shape[1]
+    n_axes = n_draws + 1
+    w, h = figsize if figsize is not None else (12.0, max(5.0, 2.0 * n_axes))
+    fig, axes = plt.subplots(n_axes, 1, sharex=True, figsize=(w, h))
+    if n_axes == 1:
+        axes = np.array([axes])
+
     for j in range(n_draws):
-        ax = axes[base + j]
+        ax = axes[j]
         dn = net.draw_nodes[j]
-        ax.plot(t_plot, draw_rates[:, j], color="C1", linewidth=1.0)
+        ax.plot(t_plot, draw_rates[:, j], color=f"C{j + 1}", linewidth=1.0)
         ax.set_ylabel("ṁ [kg/s]")
         ax.set_title(f"Draw: {dn.name}")
         ax.grid(True, alpha=0.3)
@@ -433,17 +968,119 @@ def plot_flow_timeseries(
         plt.show()
     return fig
 
+def plot_pipe_temperature_heatmaps(
+    net: DHWNetwork,
+    result: dict,
+    *,
+    time_unit: str = "h",
+    cmap: str = "plasma",
+    figsize: tuple[float, float] | None = None,
+    save_path: str | Path | None = None,
+    show: bool = False,
+) -> plt.Figure:
+    """Heatmap of temperature along every pipe vs time.
 
-# ──────────────────────────────────────────────────────────────────────
-# Pretty-print helper
-# ──────────────────────────────────────────────────────────────────────
+    Each subplot shows one pipe as a 2-D image:
 
-def _print_discretisation(net: DHWNetwork, dz: float) -> None:
-    print(f"  Target dz = {dz} m — pipe discretisation:")
-    for name, pipe in zip(net.pipe_names, net.pipes):
-        actual_dz = pipe.length / pipe.N_cells
-        print(f"    {name:<18s}  L={pipe.length:5.1f} m  "
-              f"N={pipe.N_cells:3d} cells  dz={actual_dz:.3f} m")
+    * **X axis** — simulation time.
+    * **Y axis** — distance from the pipe inlet [m], with cell 0
+      (upstream end / boiler outlet) at the bottom.
+    * **Colour** — water temperature [°C].
+
+    Draw-node positions are marked with a dashed horizontal line and
+    labelled on the right-hand side.
+
+    Parameters
+    ----------
+    net :
+        Network whose pipe names and draw nodes are used for labels.
+    result :
+        Return value of :meth:`FlowSolver.simulate_temperatures`
+        (must contain ``"time"``, ``"T_pipe"``, ``"draw_names"``).
+    time_unit :
+        ``"h"`` (hours) or ``"s"`` (seconds) on the time axis.
+    cmap :
+        Matplotlib colormap name. ``"plasma"`` works well for temperature.
+    figsize :
+        Optional ``(width, height)`` in inches.
+    save_path :
+        If set, figure is saved here (parent dirs are created).
+    show :
+        If ``True``, call ``plt.show()`` before returning.
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+    """
+    t_s = np.asarray(result["time"], dtype=float)
+    t_plot, xlabel = (t_s / 3600.0, "Time [h]") if time_unit == "h" else (t_s, "Time [s]")
+
+    T_pipe: dict[int, np.ndarray] = result["T_pipe"]   # {pipe_idx: (N_t, N_cells)}
+    n_pipes = len(T_pipe)
+    pipe_names = list(getattr(net, "pipe_names", [f"pipe {i}" for i in range(n_pipes)]))
+
+    # Build a lookup of draw nodes keyed by pipe index
+    draw_by_pipe: dict[int, list] = {}
+    for dn in net.draw_nodes:
+        draw_by_pipe.setdefault(dn.pipe_index, []).append(dn)
+
+    w, h = figsize if figsize is not None else (14.0, max(4.0, 3.0 * n_pipes))
+    fig, axes = plt.subplots(n_pipes, 1, figsize=(w, h))
+    if n_pipes == 1:
+        axes = np.array([axes])
+
+    # Shared colour scale across all pipes for easy cross-pipe comparison
+    all_T = np.concatenate([T_pipe[i].ravel() for i in range(n_pipes)])
+    vmin, vmax = float(np.nanmin(all_T)), float(np.nanmax(all_T))
+
+    for i, ax in enumerate(axes):
+        pipe  = net.pipes[i]
+        T_mat = T_pipe[i]           # (N_t, N_cells)
+        N     = pipe.N_cells
+        dz    = pipe.dz
+
+        # imshow: rows → spatial (N_cells), cols → time (N_t)
+        # extent = [t_left, t_right, z_bottom, z_top] with origin='upper'
+        # → row 0 (inlet) appears at the top, row N-1 (outlet) at the bottom
+        im = ax.imshow(
+            T_mat.T,
+            aspect="auto",
+            origin="upper",
+            extent=[t_plot[0], t_plot[-1], pipe.length, 0.0],
+            cmap=cmap,
+            vmin=vmin,
+            vmax=vmax,
+            interpolation="nearest",
+        )
+
+        # Mark draw-node positions
+        for dn in draw_by_pipe.get(i, []):
+            z_dn = (dn.cell_index + 0.5) * dz   # cell-centre position [m]
+            ax.axhline(z_dn, color="white", linewidth=0.9, linestyle="--", alpha=0.8)
+            ax.text(
+                t_plot[-1], z_dn, f"  {dn.name}",
+                color="white", fontsize=7, va="center", ha="left",
+                clip_on=True,
+            )
+
+        label = pipe_names[i] if i < len(pipe_names) else f"pipe {i}"
+        ax.set_title(f"Pipe: {label}")
+        ax.set_ylabel("Distance from inlet [m]")
+
+        cb = fig.colorbar(im, ax=ax, pad=0.01)
+        cb.set_label("T [°C]", fontsize=8)
+        cb.ax.tick_params(labelsize=7)
+
+    axes[-1].set_xlabel(xlabel)
+    plt.tight_layout()
+
+    if save_path is not None:
+        save_path = Path(save_path)
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+    if show:
+        plt.show()
+    return fig
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -451,31 +1088,50 @@ def _print_discretisation(net: DHWNetwork, dz: float) -> None:
 # ──────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    net = build_residential_network(dz=0.5)
+    net = build_residential_network(dz=1)
+    _print_network_diagram(net)
 
     t_start, t_end, dt = 0.0, 24.0 * 3600.0, 1.0
-    result = solve_flow_rates(net, t_start, t_end, dt)
+    dhw_solver = FlowSolver(net, t_start, t_end, dt)
 
-    fig = plot_flow_timeseries(
-        net,
-        result,
-        save_path="output/plots/flow_timeseries_pipes_nodes.png",
+    flow_result = dhw_solver.solve_flow_rates()
+    temp_result = dhw_solver.simulate_temperatures(T_init=60.0)
+
+    fig_ts = plot_temperature_timeseries(
+        temp_result,
+        time_unit="h",
+        save_path="output/plots/temperature_timeseries.png",
         show=False,
     )
-    plt.close(fig)
-    print("Wrote output/plots/flow_timeseries_pipes_nodes.png")
+    plt.close(fig_ts)
 
-    def snapshot(tag: str, t_sample_h: float) -> None:
-        idx = int((t_sample_h * 3600.0 - t_start) / dt)
-        print(f"\n  Flow rates at t = {t_sample_h:.2f} h  [{tag}]:")
-        for p, name in enumerate(net.pipe_names):
-            print(f"    {name:<18s}  ṁ = {result['pipe_flows'][idx, p]:.4f} kg/s")
-        print(f"    {'cold_makeup':<18s}  ṁ = {result['mdot_cold'][idx]:.4f} kg/s")
-        print(f"  Draws at t = {t_sample_h:.2f} h:")
-        for j, dn in enumerate(net.draw_nodes):
-            print(f"    {dn.name:<18s}  ṁ = {result['draw_rates'][idx, j]:.4f} kg/s")
+    fig_hm = plot_pipe_temperature_heatmaps(
+        net,
+        temp_result,
+        time_unit="h",
+        save_path="output/plots/temperature_heatmaps.png",
+        show=False,
+    )
+    plt.close(fig_hm)
 
-    snapshot("morning shower",       7.10)
-    snapshot("mid-morning faucet",   7.30)
-    snapshot("lunchtime sink+faucet", 12.05)
-    snapshot("quiet pre-dawn",       3.00)
+    fig_pf = plot_pipe_flow_timeseries(
+        net,
+        flow_result,
+        time_unit="h",
+        save_path="output/plots/pipe_flow_timeseries.png",
+        show=False,
+    )
+    plt.close(fig_pf)
+
+    fig_dr = plot_draw_timeseries(
+        net,
+        flow_result,
+        time_unit="h",
+        save_path="output/plots/draw_timeseries.png",
+        show=False,
+    )
+    plt.close(fig_dr)
+
+    heater_energy = dhw_solver.compute_heater_energy(temp_result)
+    print(heater_energy)
+   

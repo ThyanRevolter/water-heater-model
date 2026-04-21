@@ -49,6 +49,7 @@ def default_pipe(length=5.0, dz=0.5, d_inner=0.02, insul_t=0.025) -> PipeParams:
         h_ext=10.0,                    # W/(m²·K) free convection
         pipe_k=385.0,                  # copper
         N_cells=_n_cells(length, dz),
+        dz=dz,   # cell size
     )
 
 

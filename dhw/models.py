@@ -17,6 +17,7 @@ class PipeParams:
     h_ext: float           # W/(m²·K) external convection coefficient
     pipe_k: float          # W/(m·K)  pipe wall conductivity (copper ~385)
     N_cells: int           # number of finite-volume cells along pipe
+    dz: float              # m         cell size
 
 
 @dataclass
@@ -67,10 +68,11 @@ class DHWNetwork:
     rho: float = 998.0             # kg/m³     water density
     T_supply: float = 60.0         # °C        boiler setpoint
     T_cold: float = 15.0           # °C        cold-water makeup temperature
-    T_ambient: float = 20.0        # °C        surroundings
+    T_ambient: float = 16.0        # °C        surroundings
     heater_power: float = 4500.0   # W         electric element
     boiler_volume: float = 0.189   # m³        ~50 gal tank
     mdot_recirc: float = 0.006     # kg/s      recirculation pump flow
+    dz : float = 1.0               # m         cell size
 
     pipes: List[PipeParams] = field(default_factory=list)
     draw_nodes: List[DrawNode] = field(default_factory=list)

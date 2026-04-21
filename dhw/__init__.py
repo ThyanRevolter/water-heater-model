@@ -13,7 +13,10 @@ from .models import PipeParams, DrawNode, HeatExchangerNode, DHWNetwork
 from .network import default_pipe, build_sample_network, build_industrial_network
 from .solver import compute_pipe_UA, build_global_system, simulate
 from .postprocessing import plot_results, plot_boiler_power, plot_draw_flows, animate_temperatures, compute_energy_metrics, export_draw_csv, draw_network
-from .pypes_network import DHWDrawNetwork
+try:
+    from .pypes_network import DHWDrawNetwork
+except ImportError:
+    DHWDrawNetwork = None  # type: ignore[assignment,misc]
 
 __all__ = [
     "PipeParams",
