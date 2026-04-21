@@ -70,6 +70,7 @@ class DHWNetwork:
     T_cold: float = 15.0           # °C        cold-water makeup temperature
     T_ambient: float = 16.0        # °C        surroundings
     heater_power: float = 4500.0   # W         electric element
+    heater_efficiency: float = 1.0 # fraction  electric input converted to water heat
     boiler_volume: float = 0.189   # m³        ~50 gal tank
     mdot_recirc: float = 0.006     # kg/s      recirculation pump flow
     dz : float = 1.0               # m         cell size
