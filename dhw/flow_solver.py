@@ -676,12 +676,6 @@ class FlowSolver:
                     - UA_L / (net.rho * A * net.c) * (T_p - net.T_ambient)  # wall loss  [K/s]
                 )
 
-                # Optional HX nodes
-                for j in range(N):
-                    if (i, j) in hx_lookup:
-                        UA_hx, T_proc = hx_lookup[(i, j)]
-                        dT[j] -= UA_hx / (m_cell * net.c) * (T_p[j] - T_proc)
-
                 dy[s : s + N] = dT
 
             # ── Boiler ODE ─────────────────────────────────────────────
@@ -770,7 +764,7 @@ def plot_temperature_timeseries(
     save_path: str | Path | None = None,
     show: bool = False,
 ) -> plt.Figure:
-    """Plot boiler and per-draw-node temperatures from :meth:`simulate_temperatures`.
+    """Plot boiler and per-draw-node temperatures on a single axes.
 
     Parameters
     ----------
@@ -797,30 +791,27 @@ def plot_temperature_timeseries(
     draw_names = list(result["draw_names"])
     n_draws    = T_draw.shape[1]
 
-    n_axes = 1 + n_draws
-    w, h   = figsize if figsize is not None else (12.0, max(5.0, 2.0 * n_axes))
-    fig, axes = plt.subplots(n_axes, 1, sharex=True, figsize=(w, h))
-    if n_axes == 1:
-        axes = np.array([axes])
+    w, h = figsize if figsize is not None else (12.0, 5.5)
+    fig, ax = plt.subplots(1, 1, figsize=(w, h))
 
     # Boiler temperature
-    ax = axes[0]
     ax.plot(t_plot, T_boiler, color="C0", linewidth=1.2, label="Boiler")
-    ax.set_ylabel("T [°C]")
-    ax.set_title("Boiler temperature")
-    ax.grid(True, alpha=0.3)
-    ax.legend(loc="upper right", fontsize=8)
 
     # Per-draw temperatures
     for j in range(n_draws):
-        ax = axes[j + 1]
-        ax.plot(t_plot, T_draw[:, j], color=f"C{j + 1}", linewidth=1.2)
-        ax.set_ylabel("T [°C]")
-        ax.set_title(f"Draw temperature: {draw_names[j]}")
-        ax.grid(True, alpha=0.3)
+        ax.plot(
+            t_plot,
+            T_draw[:, j],
+            color=f"C{j + 1}",
+            linewidth=1.2,
+            label=f"Draw: {draw_names[j]}",
+        )
 
-    axes[-1].set_xlabel(xlabel)
-    fig.align_ylabels(axes)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel("T [°C]")
+    ax.set_title("Boiler and draw temperatures")
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc="best", fontsize=8, ncol=2)
     plt.tight_layout()
 
     if save_path is not None:
@@ -1088,7 +1079,7 @@ def plot_pipe_temperature_heatmaps(
 # ──────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    net = build_residential_network(dz=1)
+    net = build_residential_network(dz=0.5)
     _print_network_diagram(net)
 
     t_start, t_end, dt = 0.0, 24.0 * 3600.0, 1.0

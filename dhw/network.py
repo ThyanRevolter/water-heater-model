@@ -18,8 +18,6 @@ build_industrial_network()  — industrial facility loop (6 pipes, 2 HX nodes, 3
 """
 
 import numpy as np
-import pandas as pd
-from typing import Callable
 from .models import PipeParams, DrawNode, HeatExchangerNode, DHWNetwork
 
 
@@ -61,14 +59,6 @@ def _make_draw_profile(peak_kg_s, on_hours):
             if h_start <= hour < h_end:
                 return peak_kg_s
         return 0.0
-    return profile
-
-
-def _read_draw_profile(path: str) -> Callable:
-    """Read a draw profile from a CSV file."""
-    profile = pd.read_csv(path)
-    def profile(t):
-        return profile.loc[profile['time'] == t, 'mdot'].values[0]
     return profile
 
 
@@ -186,6 +176,7 @@ def _industrial_pipe(length, d_inner, dz=1.0, insul_t=0.04) -> PipeParams:
         h_ext=15.0,                    # W/(m²·K) light forced convection (plant floor)
         pipe_k=16.0,                   # stainless steel
         N_cells=_n_cells(length, dz),
+        dz=dz,
     )
 
 
